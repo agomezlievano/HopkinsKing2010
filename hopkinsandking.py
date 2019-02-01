@@ -132,10 +132,6 @@ def getWords2Analyze(text_cleaned, kwords_vec):
 
 
 
-
-
-
-
 def create_combination_str(row):
     return ''.join(map(str, row))
 
@@ -165,6 +161,17 @@ def create_Pmat(edgelist_df, columns_names = ['category_destination', 'category_
 
 def getQmat(Pmat):
     return np.linalg.inv(Pmat.T.dot(Pmat)).dot(Pmat.T)
+
+def create_Pw(vectext):
+    vectorizer = CountVectorizer()
+    X = vectorizer.fit_transform(vectext)
+    Xdf = pd.DataFrame(X.toarray(), columns = vectorizer.get_feature_names())
+    Xdf['wordcombination'] = Xdf.apply(create_combination_str, axis=1)
+    Xdf['count'] = 1.0
+    Pw = Xdf.groupby(by = ['wordcombination'])['count'].sum()
+
+    return Pw
+
 
 
 

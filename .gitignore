@@ -1,2 +1,5 @@
 # Large files to exclude
 df4.csv
+
+# Some old exploration scripts to ignore
+old_test.ipynb
