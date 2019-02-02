@@ -7,8 +7,9 @@ import numpy as np
 from numpy.random import choice
 import pandas as pd
 
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin, RegressorMixin
 from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics import mean_squared_error
 
 from nltk import WordNetLemmatizer
 from nltk.tokenize import sent_tokenize, word_tokenize
@@ -160,7 +161,10 @@ def create_Pmat(edgelist_df, columns_names = ['category_destination', 'category_
     return Pmat_WgC
 
 def getQmat(Pmat):
-    return np.linalg.inv(Pmat.T.dot(Pmat)).dot(Pmat.T)
+    Qmat = pd.DataFrame(np.linalg.inv(Pmat.T.dot(Pmat)).dot(Pmat.T),
+                        index = Pmat.columns.values, columns = Pmat.index.values)
+    return Qmat
+    
 
 def create_Pw(vectext):
     vectorizer = CountVectorizer()
@@ -175,34 +179,25 @@ def create_Pw(vectext):
 
 
 
-class HopkinsKingCategoryCount(BaseEstimator, TransformerMixin):
+class HopkinsKingCategoryCount(BaseEstimator, RegressorMixin):
     """
     This implements Hopkins-King, ''A Method of Automated Nonparametric Content
     Analysis for Social Science''.
 
     Parameters
-    ----------
-    setOk : array-like
-        This comes, for example, from applying np.nonzero(A==condition) to a matrix
-    
-    missing_values : number, string, np.nan (default) or None
-        The placeholder for the missing values. All occurrences of
-        `missing_values` will be imputed.
+    ----------        
+    kwords : int (default=25)
+        Each document must be characterized by kwords.
         
-    lamb : int (default=0)
-        This is the regularization parameter, which should be non-negative since
-        it is a minimization procedure.
-        
-    epsilon : float (default=0.001)
-        Desired accuracy of the estimation.
+    random_seed : int (default=None)
+        A random seed for sampling the kwords.
     
-    max_iters : integer (default=100)
+    min_freq : integer (default=10)
+        In the whole training corpus, very rare words will be dropped if they
+        appear less than min_freq times.
     
-    doprint : boolean, optional (default=False)
-        Prints different results of the estimation steps.
-        
-    printbatch : integer, optional if doprint==True (default=10)
-        After how many iterations to print the loss function.
+    sample_with_weights : boolean, optional (default=True)
+        Sample the kwords according to their frequency in the corpus.
         
     copy : boolean, optional, default True
         Set to False to perform inplace row normalization and avoid a
@@ -211,16 +206,13 @@ class HopkinsKingCategoryCount(BaseEstimator, TransformerMixin):
 
     Attributes
     ----------
-    Lest_ : array-like, shape (N, T)
-        This is the estimate of L.
+    selectedkwords_vec_ : array-like
+        This is an array of kword selected from the corpus.
     
-    loss_ : float
-        The root-square of the mean square error of the observed elements.
-        
-    iters_ : int
-        Number of iterations it took the algorithm to get the desired
-        precision given by the parameter 'epsilon'.
-        
+    PWgC_ : float
+        This is the fitted matrix of probabilities mapping word-combinations
+        to categories, P(W|C).
+                
     Examples
     --------
     >>> import numpy as np
@@ -236,10 +228,12 @@ class HopkinsKingCategoryCount(BaseEstimator, TransformerMixin):
 
     def __init__(self, kwords=25, min_freq=10, 
                  random_seed = None,
+                 sample_with_weights = True,
                  copy=True):
         self.kwords = kwords 
         self.min_freq = min_freq
         self.random_seed = random_seed
+        self.sample_with_weights = sample_with_weights
         self.copy = copy
 
     def fit(self, X, y):
@@ -265,102 +259,111 @@ class HopkinsKingCategoryCount(BaseEstimator, TransformerMixin):
             Returns self.
         """
         
-        # I should check everthing is OK
-        assert ((self.kwords > 0) & (self.kwords < len(X.shape[0]))), "0 < kwords < np.log2(length of array)"
+        # Check everthing is OK
+        assert (self.kwords > 0), "0 < kwords"
         assert (len(X.shape) == 1), "The input X for the fit should be an array of text (long descriptions)"
         assert (len(y.shape) == 1), "The input y for the fit should be an array of text (categories)"
         
-        # Create the cleaning function, clean the text, and create bag of words with the frequencies
+        # Create the cleaning function and clean text
         ct = CleanText()
-        str_clean, word_count = ct.fit_transform(X.values)
-        
-        # Get a small k-sample of words
-        
-        
-        
-        words2analyze = getWords2Analyze(word_count, words2keep=None, min_freq=10)
-        
-        
-        # Removing the most and least common words
-        #binary_2drop = ((word_count['frequency']==word_count['frequency'].max()) | 
-        #        (word_count['frequency']<=self.min_freq))
-        #words2drop = word_count.loc[binary_2drop]
-        #words2keep = word_count.loc[~binary_2drop]
-        
-        #words2keep_as_set = set(words2keep.word.values)
-        
-        # Keep only the important words
-        words2analyze = getWords2Analyze(word_count, words2keep=None, min_freq=10)
-        
-        # Restricting the analysis to a subset of words
-        if(self.random_seed is not None): np.random.seed(self.random_seed)
-        wordsconsidered = choice(words2keep.word.values, 
-                                 size=self.kwords, 
-                                 p = words2keep.frequency.values/sum(words2keep.frequency.values), 
-                                 replace=False)
-        
-        # Convert the bag of words into an array
-        vectext = words2analyze.apply(lambda x: " ".join(list(set(x.split()).intersection(set(wordsconsidered)))))
-        
-        # From the array, create a Data Frame
-        Xdf = create_Xmat(vectext)
-        Xdf['category'] = y.values
-        Xdf['count'] = 1.0
-        
-        # 10- 
-        Fsd = Xdf[['wordcombination', 'category', 'count']].groupby(by = ['wordcombination', 'category'], as_index=False).sum()
-        Fsd['tot_by_category'] = Fsd.groupby(by = ['category'])['count'].transform('sum')
-        Fsd['P_s_given_D'] = Fsd['count']/Fsd['tot_by_category']
-        
-        # 11-
-        Pmat_SgD = Fsd.pivot(index = 'wordcombination', columns='category', values = 'P_s_given_D').fillna(0.0)
-        
-        self.Pmat_SgD_ = Pmat_SgD
-        self.Qtransform_ = (np.linalg.inv((final_Pmat_SgD.T).dot(final_Pmat_SgD))).dot(final_Pmat_SgD.T)
-        
+        text_cleaned = ct.fit_transform(X)
+
+        # Create word count dataframe
+        word_count_df = create_wordCount(text_cleaned)
+
+        # Get a small word representation of each document
+        self.selectedkwords_vec_ = sample_kwords(word_count_df, kwords=self.kwords, 
+                                            min_freq=self.min_freq, 
+                                            sample_with_weights=self.sample_with_weights, 
+                                            random_seed=self.random_seed)
+
+        # Represent each observation as a vector of presence/absence of the works in the small sample
+        words2analyze = getWords2Analyze(pd.Series(text_cleaned), self.selectedkwords_vec_)
+
+        # Create matrix of counts by word combination and label
+        Xmat_df = create_Xmat(words2analyze, y)
+
+        # Create P(W|C)
+        self.PWgC_ = create_Pmat(Xmat_df, ['wordcombination', 'category','count'])
+
         # Return the transformer
         return self
 
-    def transform(self, X):
+
+
+    def predict(self, X, y=None):
         """ 
-        Actually returning the estimated matrix, in which we have 
-        imputed the missing values of X (matrix Y).
+        We use the matrix P(W|C) to predict the probability/frequency vector P(C).
         
         Parameters
         ----------
-        X : {array-like, sparse-matrix}, shape (N, T)
+        X : {array-like, sparse-matrix}, shape (word combinations)
             The input data to complete.
             
         Returns
         -------
-        X_transformed : array, shape (N, T)
-            The array the completed matrix.
+        N_per_C : array, shape (num_categories)
+            The array with the estimated fraction/counts of documents per category.
         """
         try:
-            getattr(self, "Qtransform_")
+            getattr(self, "PWgC_")
         except AttributeError:
-            raise RuntimeError("You must estimate the model before transforming the data!")
+            raise RuntimeError("You must fit the model before predicting!")
                 
-        
-        # create the array of words to analyze
-        words2analyze = d
-        
-        # 1 - 
-        vectext_test = words2analyze.apply(lambda x: " ".join(list(set(x.split()).intersection(set(wordsconsidered)))))
+        # Clean the test text
+        ct = CleanText()
+        text_cleaned_test = ct.fit_transform(X)
 
-        Xdf_test = create_Xmat(vectext_test)
-        Xdf_test['category'] = longdf_test['cpc_1_text'].values
+        # Represent each observation in the test text as a vector of presence/absence of the works in the small sample
+        words2analyze_test = getWords2Analyze(pd.Series(text_cleaned_test), self.selectedkwords_vec_) 
 
-        Xdf_test['count'] = 1.0
-        
-        Ps = Xdf_test.groupby(by = ['wordcombination'])['count'].sum()
-        
-        # 2 - Completing the word combinations
-        missingwordcombinations = set(Ps.index).difference(set(self.Pmat_SgD_.index))
+        # Create the number of documents in destination category (i.e., documents per word-combination)
+        N_per_W = create_Pw(words2analyze_test) 
 
-        missing_Pmat_SgD = pd.DataFrame(np.zeros((len(missingwordcombinations), self.Pmat_SgD_.shape[1])),
-                               index = list(missingwordcombinations), columns = self.Pmat_SgD_.columns)
+        # Check whether all wordcombinations in test set are in the training set
+        missing_in_train = np.array(list(set(N_per_W.index).difference(set(self.PWgC_.index))))
+        if len(missing_in_train)>0: 
+            print("There are {} word combinations in test missing in training set.".format(len(missing_in_train)))
+            print("That is, {0:.0f} documents in test.".format(np.sum(N_per_W.loc[missing_in_train])))
+            print("These represent a fraction of {number:.{digits}f} documents in test.".format(number=np.sum(N_per_W.loc[missing_in_train])/N_per_W.sum(),
+                                                                                            digits = 2))
         
+        # Expand so that train and test have the same word combinations
+        missing_PWgC = pd.DataFrame(np.zeros((len(missing_in_train), self.PWgC_.shape[1])),
+                                    index = list(missing_in_train), columns = self.PWgC_.columns)
+        final_PWgC = pd.concat((self.PWgC_, missing_PWgC))
+        final_N_per_W = N_per_W.reindex(final_PWgC.index, fill_value=0.0)
+
+        # Create the transformation matrix Q
+        Qmat = getQmat(final_PWgC)
+
+        # Create category count
+        N_per_C = Qmat.dot(final_N_per_W)
         
-        return self.Lest_
+        return N_per_C
+
+    def loss(self, X, y):
+        """
+        Computes the root mean squared error.
+        """
+
+        # Check everything is ok
+        try:
+            getattr(self, "PWgC_")
+        except AttributeError:
+            raise RuntimeError("You must fit the model before scoring predictions!")
+        
+        assert (len(y.shape) == 1), "The input y for the fit should be an array of text (categories)"
+
+        # Predicted counts
+        y_pred = self.predict(X)
+
+        # True counts
+        y_real = pd.DataFrame(list(zip(*[y, np.ones_like(y)])), columns=['category', 'count']).groupby('category')['count'].sum()
+
+        # return RMSE
+        return np.sqrt(mean_squared_error(y_real, y_pred))
+
+
+
 
