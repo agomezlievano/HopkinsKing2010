@@ -3,3 +3,6 @@ df4.csv
 
 # Some old exploration scripts to ignore
 old_test.ipynb
+
+# Folders to ignore
+literature/

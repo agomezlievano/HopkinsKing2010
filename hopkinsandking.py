@@ -10,6 +10,8 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin, RegressorMixin
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import ParameterGrid, KFold
+
 
 from nltk import WordNetLemmatizer
 from nltk.tokenize import sent_tokenize, word_tokenize
@@ -32,6 +34,16 @@ sr = stopwords.words('english')
 
 
 class CleanText(BaseEstimator, TransformerMixin):
+    """
+    This function wraps together several steps for cleaning a long string 
+    with many words and characters.
+
+    Examples
+    --------
+    >>> ct = CleanText()
+    >>> longdf['cleaned_text'] = ct.fit_transform(longdf['text'])
+
+    """
     def remove_mentions(self, input_text):
         return re.sub(r'@\w+', '', input_text)
     
@@ -212,6 +224,10 @@ class HopkinsKingCategoryCount(BaseEstimator, RegressorMixin):
     PWgC_ : float
         This is the fitted matrix of probabilities mapping word-combinations
         to categories, P(W|C).
+    
+    N_per_C_ : array-like
+        This is what is returned after using the 'predict' method on a test
+        set.
                 
     Examples
     --------
@@ -226,17 +242,23 @@ class HopkinsKingCategoryCount(BaseEstimator, RegressorMixin):
     
    
 
-    def __init__(self, kwords=25, min_freq=10, 
+    def __init__(self, col_names = ["word_combination", "category"], 
+                kwords=25, min_freq=10, 
+                do_clean_text = False,
                  random_seed = None,
                  sample_with_weights = True,
-                 copy=True):
+                 copy=True,
+                 verbose=False):
+        self.col_names = col_names
         self.kwords = kwords 
         self.min_freq = min_freq
+        self.do_clean_text = do_clean_text
         self.random_seed = random_seed
         self.sample_with_weights = sample_with_weights
         self.copy = copy
+        self.verbose = verbose
 
-    def fit(self, X, y):
+    def fit(self, X, y=None):
         """
         Estimating the matrix P(S|D) which computes the fraction (or
         probability) that a combination of words S was the outcome of
@@ -261,12 +283,15 @@ class HopkinsKingCategoryCount(BaseEstimator, RegressorMixin):
         
         # Check everthing is OK
         assert (self.kwords > 0), "0 < kwords"
-        assert (len(X.shape) == 1), "The input X for the fit should be an array of text (long descriptions)"
-        assert (len(y.shape) == 1), "The input y for the fit should be an array of text (categories)"
+        assert (len(X.shape) == 2), "The input X for the fit should be an array of text (long descriptions)"
+        #assert (len(y.shape) == 1), "The input y for the fit should be an array of text (categories)"
         
         # Create the cleaning function and clean text
-        ct = CleanText()
-        text_cleaned = ct.fit_transform(X)
+        if(self.do_clean_text==True):
+            ct = CleanText()
+            text_cleaned = ct.fit_transform(X[self.col_names[0]])
+        else:
+            text_cleaned = np.copy(X[self.col_names[0]])
 
         # Create word count dataframe
         word_count_df = create_wordCount(text_cleaned)
@@ -281,10 +306,16 @@ class HopkinsKingCategoryCount(BaseEstimator, RegressorMixin):
         words2analyze = getWords2Analyze(pd.Series(text_cleaned), self.selectedkwords_vec_)
 
         # Create matrix of counts by word combination and label
-        Xmat_df = create_Xmat(words2analyze, y)
+        Xmat_df = create_Xmat(words2analyze, X[self.col_names[1]].values)
 
         # Create P(W|C)
         self.PWgC_ = create_Pmat(Xmat_df, ['wordcombination', 'category','count'])
+
+        if(self.verbose):
+            # Print some message
+            print(" ==> Finished selecting some k words and creating the matrix of P(W|C).") 
+            print(" ==> Access them through object.PWgC_ and object.selectedkwords_vec_")
+            print(self.selectedkwords_vec_)
 
         # Return the transformer
         return self
@@ -311,8 +342,12 @@ class HopkinsKingCategoryCount(BaseEstimator, RegressorMixin):
             raise RuntimeError("You must fit the model before predicting!")
                 
         # Clean the test text
-        ct = CleanText()
-        text_cleaned_test = ct.fit_transform(X)
+        if(self.do_clean_text==True):
+            ct = CleanText()
+            text_cleaned_test = ct.fit_transform(X[self.col_names[0]])
+        else:
+            text_cleaned_test = np.copy(X[self.col_names[0]])
+
 
         # Represent each observation in the test text as a vector of presence/absence of the works in the small sample
         words2analyze_test = getWords2Analyze(pd.Series(text_cleaned_test), self.selectedkwords_vec_) 
@@ -322,7 +357,7 @@ class HopkinsKingCategoryCount(BaseEstimator, RegressorMixin):
 
         # Check whether all wordcombinations in test set are in the training set
         missing_in_train = np.array(list(set(N_per_W.index).difference(set(self.PWgC_.index))))
-        if len(missing_in_train)>0: 
+        if (len(missing_in_train)>0 and self.verbose==True): 
             print("There are {} word combinations in test missing in training set.".format(len(missing_in_train)))
             print("That is, {0:.0f} documents in test.".format(np.sum(N_per_W.loc[missing_in_train])))
             print("These represent a fraction of {number:.{digits}f} documents in test.".format(number=np.sum(N_per_W.loc[missing_in_train])/N_per_W.sum(),
@@ -339,7 +374,15 @@ class HopkinsKingCategoryCount(BaseEstimator, RegressorMixin):
 
         # Create category count
         N_per_C = Qmat.dot(final_N_per_W)
+
+        # Save it to self
+        self.N_per_C_ = N_per_C
         
+        if(self.verbose):
+            # Print some message
+            print(" ==> Finished counting documents given the k words selected, and estimating counts per category (returned).")
+            print(" ==> Access them through object.N_per_C_")
+
         return N_per_C
 
     def loss(self, X, y):
@@ -359,11 +402,91 @@ class HopkinsKingCategoryCount(BaseEstimator, RegressorMixin):
         y_pred = self.predict(X)
 
         # True counts
-        y_real = pd.DataFrame(list(zip(*[y, np.ones_like(y)])), columns=['category', 'count']).groupby('category')['count'].sum()
+        # y_real = pd.DataFrame(list(zip(*[y, np.ones_like(y)])), columns=['category', 'count']).groupby('category')['count'].sum()
 
         # return RMSE
-        return np.sqrt(mean_squared_error(y_real, y_pred))
+        return np.sqrt(mean_squared_error(y, y_pred))
 
 
 
 
+def my_custom_loss_func(y_real, y_pred):
+    """
+    Computes the root mean squared error.
+    """
+
+    # return RMSE
+    return np.sqrt(mean_squared_error(y_real, y_pred))
+
+def hopkinsking_kfold_CV(X, col_names, params, num_splits=5):
+    """
+    This function assumes that 'params' is a dictionary specifying
+    the parameter (key) and its value. For example,
+    params = {'kwords': 25, 'min_freq': 10}
+    
+    """
+    kfold = KFold(n_splits=num_splits, shuffle=True)
+    vec_errors = np.zeros(num_splits)
+    for i, train_test_tuple in enumerate(kfold.split(X)):
+        # Getting X
+        X_train_i = X.iloc[train_test_tuple[0]]
+        X_valid_i = X.iloc[train_test_tuple[1]]
+        
+        # Getting y
+        y_train_i = X_train_i.groupby(by = [col_names[1]]).count()
+        y_valid_i = X_valid_i.groupby(by = [col_names[1]]).count()
+
+        # Initializing the HopkinsKing object
+        my_hk_i = HopkinsKingCategoryCount(**params, col_names=col_names)
+
+        # Fitting
+        my_hk_i.fit(X_train_i)
+
+        # Predicting
+        y_pred_i = my_hk_i.predict(X_valid_i)
+        
+        # Error on validation set
+        vec_errors[i] = my_custom_loss_func(y_valid_i, y_pred_i)
+        
+    return vec_errors
+
+def hopkinsking_GridSearchCV(X, col_names, params_multiple_vals, num_splits=5, doprint=True):
+    """
+    This function assumes that 'params_multiple_vals' is a dictionary specifying
+    the parameter (key) and a list with different possible values. For example,
+    params = {'kwords': [25, 50], 'min_freq': [10]}
+    
+    """
+    
+    param_grid = ParameterGrid(params_multiple_vals)
+    dict_errors = dict()
+    
+    # Looping through all parameter-value combinations
+    best_params = {}
+    best_error = 10**6
+    for i, params in enumerate(param_grid):
+        print("Evaluating parameter combination #{}".format(i+1))
+        error_i = hopkinsking_kfold_CV(X, col_names, params, num_splits=num_splits)
+        dict_errors[f"Error for {params}"] = error_i
+        if np.mean(error_i) < best_error:
+            best_error = np.mean(error_i)
+            best_params = params
+    
+    # Creating a dataframe out of the dictionary
+    df_results = pd.DataFrame(dict_errors, index=["Fold {}".format(i+1) for i in range(num_splits)]).T
+    df_results["Mean error"] = df_results.mean(axis=1)
+    
+    vec_rmse = df_results.mean(axis=1)
+    
+    if doprint:
+        print("\nMatrix of errors:")
+        print("-----------------")
+        print(df_results)
+        print("\nAverage RMSE across folds:")
+        print("--------------------------")
+        print(vec_rmse)
+        print("\nBest parameter value (returned):")
+        print("--------------------------------")
+        print(best_params)
+    
+    return best_params
